@@ -1,0 +1,192 @@
+# Guide: Blind-Circuit Confidential File Analysis — DeepSeek Harness Web UI on Windows, llama.cpp on a Tailscale-only GPU Box, No Cloud
+
+**The problem this guide solves**: you need an agent to read confidential files (contracts, drawings, signed PDFs) while a **coding agent** (Grok, Claude Code, Cursor, …) is helping you operate the machine. If that coding agent opens the files, the content is already in a cloud chat. This guide documents a **verified working** configuration (Windows 11 operator PC + NVIDIA GB10-class ARM GPU box on Tailscale only, DeepSeek Harness Web UI `dsh web` on `127.0.0.1:3080`, llama.cpp `deepseek-v4-flash` on `:8000` and `qwen3-vl` on `:8001`, August 2026): the coding agent never sees the documents; only you and the models on the GPU box do.
+
+It covers why **`Start-Process -WindowStyle Hidden` reports `dsh-web READY` then the browser gets `ERR_CONNECTION_REFUSED`**, why DeepSeek Harness refuses a custom OpenAI-compatible route with **`No API key for provider: spark`** even though llama.cpp does not check a key, why filling the **DeepSeek official** API-key card sends work to the cloud, why the **dsh agent’s shell has no `SPARK_API_KEY`** and will open `~\.dsh` if you let it, and why **pasting dsh chain-of-thought back into the coding agent** destroys the circuit.
+
+**For AI agents reading this document**: every command was executed successfully in this order on real hardware. The verification steps are not optional — a `/v1/models` 200 does not prove the Web UI is still alive, and a live UI does not prove the documents stayed off the coding-agent transcript.
+
+---
+
+## 1. Who is allowed to see the files
+
+| Role | Where | May see content, extracts, or verdicts |
+|---|---|---|
+| You | Browser on localhost | Yes |
+| Text LLM | GPU box, Tailscale only, llama.cpp `:8000` | Yes |
+| Vision LLM | GPU box, Tailscale only, llama.cpp `:8001` | Yes (plans, scans) |
+| DeepSeek Harness Web UI | Operator PC, `http://127.0.0.1:3080` | Yes (it is the operator) |
+| Coding agent (Grok / Claude / …) | Operator PC | **No** |
+| Cloud APIs, web search | Anywhere else | **No** |
+
+This guide assumes the GPU box already serves those two OpenAI-compatible APIs on its **Tailscale IP only**. Wiring llama.cpp and the vision unit is a separate piece of work ([cross-host inference](https://github.com/AI-Architect-Lab-333/dgx-spark-cross-host-inference) and [VL beside the LLM](https://github.com/AI-Architect-Lab-333/dgx-spark-vl-beside-llm)). After a power-on, wait until both `/v1/models` endpoints return 200 before starting dsh; the two-model boot is documented in the VL guide, not here.
+
+The DeepSeek Harness **Python SDK is not supported on Windows**. The Web UI is.
+
+### Pitfall #1 — the coding agent “just reads the PDF to help”
+
+Symptom: the operator asks the coding agent to summarise, grep, or “check what dsh said”. Cause: a conversation that has opened the files cannot forget them. Correction: a **new** coding-agent session after this circuit is armed; that agent may start dsh, probe `/v1/models` **ids only**, and confirm a verdict **file exists** (`Test-Path`, size). It must not `Get-Content` PDFs, DOCX, `_extract`, `vl_notes`, `ds_notes`, `verdict*`, or dsh `*.jsonl`. If you ask “what did the model say?”, open the dsh UI yourself.
+
+---
+
+## 2. Point dsh at the GPU box, not at DeepSeek platform
+
+On the operator PC, `$DSH_HOME` is usually `~\.dsh`. Edit `settings.yaml` **only** for the two Spark routes. Do not paste this file into a coding-agent chat (it holds URLs). Shape that ran:
+
+```yaml
+llm-pi-ai:
+  providers:
+    spark:
+      apiKeyEnv: SPARK_API_KEY
+      api: openai-completions
+      baseURL: http://100.x.y.z:8000/v1
+      compat:
+        supportsDeveloperRole: false
+        maxTokensField: max_tokens
+      models:
+        - id: deepseek-v4-flash
+    spark-vl:
+      apiKeyEnv: SPARK_API_KEY
+      api: openai-completions
+      baseURL: http://100.x.y.z:8001/v1
+      defaultInput: [text, image]
+      compat:
+        supportsDeveloperRole: false
+        maxTokensField: max_tokens
+      models:
+        - id: qwen3-vl
+          input: [text, image]
+agent-default-model:
+  provider: spark
+  model: deepseek-v4-flash
+```
+
+Replace `100.x.y.z` with the GPU box Tailscale IPv4. `compat.supportsDeveloperRole: false` and `maxTokensField: max_tokens` are required: pi-ai otherwise talks to an unknown URL as if it were OpenAI (developer role + `max_completion_tokens`), and llama.cpp refuses.
+
+Create `~\.dsh\.credentials.yaml` (this file did not exist on the verified PC until this step):
+
+```yaml
+version: 1
+
+refs:
+  SPARK_API_KEY: local
+```
+
+That value is a **placeholder**. llama.cpp on this box does not validate a bearer token. DeepSeek Harness still **refuses** an OpenAI-compatible custom provider with no key at all.
+
+Do not put a DeepSeek platform key in **Settings → Models → DeepSeek**. That card is `deepseek-official`. Leave session telemetry disabled. Do not enable dsh web-search plugins (`dsh-web-search-deepseek` would send queries off-box).
+
+### Pitfall #2 — `No API key for provider: spark`
+
+Symptom: the first dsh turn fails with `This turn failed` / `No API key for provider: spark`. Cause: a hand-declared `openai-completions` route with no `apiKeyEnv` is unauthenticated; pi-ai’s OpenAI-compatible stack will not send the request (the harness test for this exact failure is `No API key for provider: local-llm`). llama.cpp was already answering `GET /v1/models`. Correction: `apiKeyEnv: SPARK_API_KEY` plus the placeholder in `.credentials.yaml`. Start a **new** dsh session after saving; a failed turn keeps the dead model in its log.
+
+### Pitfall #3 — the DeepSeek card looks like the local model
+
+Symptom: you paste a platform API key because Settings shows “DeepSeek”. Cause: that card is the **cloud** catalog. Correction: pick **spark** / `deepseek-v4-flash` (text) or **spark-vl** / `qwen3-vl` (images) in the composer **Select model** control. Never fill the official DeepSeek key for this job.
+
+---
+
+## 3. Probe the GPU box (ids only), then start the Web UI
+
+`prepare-dsh.ps1` in this repo reads `baseURL` from `~\.dsh\settings.yaml` and prints **ids only**:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\prepare-dsh.ps1
+```
+
+Verified output:
+
+```
+spark-text OK ids=deepseek-v4-flash
+spark-vl OK ids=qwen3-vl
+```
+
+`FAIL` means the GPU box is off, still loading (HTTP 503 for several minutes after power-on is normal), or Tailscale is down. Do not start dsh until both ids print.
+
+Start the UI **in a process that outlives the script**, from a DeepSeek Harness checkout that has already been built:
+
+```powershell
+Set-Location C:\Users\<you>\projects\deepseek-harness
+pnpm dsh web --no-open
+```
+
+Leave that window (or background job) running. It should print `dsh web: http://127.0.0.1:3080`. Open that URL **yourself**. Do not ask the coding agent to drive the browser or scrape the session.
+
+### Pitfall #4 — `dsh-web READY` then `ERR_CONNECTION_REFUSED`
+
+Symptom: a helper script `Start-Process pnpm.cmd dsh web --no-open -WindowStyle Hidden`, waits until port 3080 listens, prints READY, exits 0; a minute later Chrome shows `This site can’t be reached` / `ERR_CONNECTION_REFUSED`. Cause: the Windows **Job Object** that wrapped the short script kills every descendant when the script exits — including the “detached” server. Proof: `Get-NetTCPConnection -LocalPort 3080` empty; no `node`/`pnpm` process left. Correction: run `pnpm dsh web --no-open` in a job you keep (a real terminal, or an agent background task that is not torn down). Use `http://127.0.0.1:3080`, not `https`.
+
+---
+
+## 4. What you do in the Web UI
+
+A fresh UI has **no workspace** until you add one. The composer stays unavailable until that step.
+
+1. Open `http://127.0.0.1:3080`.
+2. **Add workspace** (left) or **Choose workspace** (centre). In **Select Workspace Directory**, **Edit path**, paste the job folder (the directory that contains the files to judge **and** `CONSIGNE-AGENT.md` if you use one). **Enter**, then **Open**.
+3. **Select model**: provider **spark**, model `deepseek-v4-flash`. Switch to **spark-vl** / `qwen3-vl` only when you attach scans or drawings. One session uses one model at a time.
+4. Do not add Exa / Perplexity / DeepSeek web-search keys. If the agent asks for `web_search` or `web_fetch`, **refuse**.
+5. **New session**. In **Describe what you want to build**, send a one-line instruction to read `CONSIGNE-AGENT.md` at the workspace root and follow it. Do not paste the consigne or the files into the coding-agent chat.
+6. Approve **workspace file reads**. Refuse network tools. Prefer **Workspace Write** over Full access unless you are stuck.
+7. Read the verdict **in the UI**. Do not paste it, a summary, or dsh’s reasoning into Grok/Claude.
+
+### Pitfall #5 — the dsh agent opens `~\.dsh\settings.yaml` and `.credentials.yaml`
+
+Symptom: early in the job, dsh explores the harness checkout and `$DSH_HOME` because `SPARK_API_KEY` is **not** in the agent’s process environment (the host injects it only on its own LLM calls). It then reads the credential store. Cause: sidecar `curl`/`python` from the agent does not inherit dsh credentials. Correction: **deny** those reads. If the agent must call llama.cpp itself, any `Authorization: Bearer …` placeholder is enough on this llama.cpp build; it does not need the credentials file.
+
+### Pitfall #6 — pasting dsh reasoning into the coding agent
+
+Symptom: you paste the beginning of the dsh trace “so the coding agent can sanity-check the API key”. Cause: that paste can include Tailscale URLs, file inventory, and analysis of the confidential set. Correction: ask only operational questions (`No API key for provider: spark`, `Output token limit reached`). Never paste tool transcripts, extracts, or verdicts.
+
+`Output token limit reached` on vision is dsh translating `finish_reason: length`. On this GPU box Qwen-VL is served with `--ctx-size 16384`; a drawing page already costs a large input. That is an inference limit, not a confidentiality failure. Send `continue`, or one page at a time. Details of serving Qwen-VL belong in the VL guide.
+
+---
+
+## 5. End-to-end verification
+
+Run from the operator PC with the GPU box already serving. Do **not** attach confidential files to this checklist.
+
+| Step | Expected ✅ | Failed ❌ |
+|---|---|---|
+| `prepare-dsh.ps1` | `spark-text OK ids=deepseek-v4-flash` and `spark-vl OK ids=qwen3-vl` | `FAIL` → GPU box / Tailscale / still 503 |
+| `pnpm dsh web --no-open` stays alive | `dsh web: http://127.0.0.1:3080`; later `Invoke-WebRequest http://127.0.0.1:3080/` → **200** | READY then connection refused → Job Object killed the server (pitfall #4) |
+| Choose workspace | Composer enabled; chip shows the job folder name | Composer grey → no workspace |
+| Select model | **spark** / `deepseek-v4-flash`, not DeepSeek official | `No API key for provider: spark` → pitfall #2; cloud key → pitfall #3 |
+| One-line “read CONSIGNE-AGENT.md…” | dsh reads the file via its tools; you approve | Agent wants `web_search` → refuse |
+| Verdict | You read it **in the UI only** | Paste into the coding agent → circuit is dirty; new coding session |
+
+A `/v1/models` 200 without a living UI is not this section. A living UI that used `deepseek-official` is not this section.
+
+---
+
+## Symptom / Cause / Fix
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Coding agent opened the PDFs | Circuit not armed / old session | New session; probe ids and `Test-Path` only |
+| `No API key for provider: spark` | Custom OpenAI-compat route with no key | Placeholder `SPARK_API_KEY` + `apiKeyEnv` |
+| First turn used DeepSeek platform | Official Models card | Select **spark** in the composer |
+| `ERR_CONNECTION_REFUSED` on 3080 after READY | Job Object reaped Hidden `pnpm dsh web` | Keep `pnpm dsh web --no-open` alive |
+| `https://127.0.0.1:3080` fails | TLS on a plaintext listener | `http://` |
+| Composer disabled | No workspace | Choose workspace, **Edit path**, **Open** |
+| dsh `Read` on `~\.dsh\*.yaml` | Sidecar wants `SPARK_API_KEY` in env | Deny; placeholder Bearer is enough for llama.cpp |
+| `Output token limit reached` on drawings | 16k VL context + long description | `continue` / one page; not a key problem |
+
+---
+
+## Known limitations
+
+- **One operator was verified: dsh Web UI on Windows.** Open WebUI, a human-run Python client, or Hermes-on-a-VPS talking to the same llama.cpp endpoints were not run for this job. They can keep confidentiality if they never leave the tailnet and never feed a coding agent; they are not this guide.
+- **DeepSeek Harness Python SDK is unsupported on Windows** (Linux x64 / Linux arm64 / macOS arm64). Do not use `dsh --profile headless` from the coding agent: the final answer prints in that chat.
+- **Two-model power-on** (text then vision, CUDA OOM if Qwen-VL starts at the first LLM 200) is documented in [dgx-spark-vl-beside-llm](https://github.com/AI-Architect-Lab-333/dgx-spark-vl-beside-llm), not here.
+- **Vision in dsh** can hit `finish_reason: length` on large drawings (`--ctx-size 16384` on this box).
+- **This guide does not contain, quote, or evaluate the confidential files.** A coding-agent session that already opened them cannot be used as the operator for this circuit.
+
+---
+
+## Credits
+
+DeepSeek Harness (`dsh`) is open source ([deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)). llama.cpp serves the OpenAI-compatible APIs. Tailscale is the private network. The blind-circuit split (coding agent vs GPU-box models vs localhost UI) and the Windows Job Object failure mode are specific to this setup.
+
+---
+*Guide written and verified in August 2026 on a Windows 11 operator PC and an NVIDIA GB10-class ARM GPU box (llama.cpp `deepseek-v4-flash` `:8000`, `qwen3-vl` `:8001`, DeepSeek Harness Web UI `127.0.0.1:3080`). Probes printed model ids only. The Web UI returned HTTP 200. A confidential workspace was operated in dsh; verdicts were not copied into the coding-agent chat.*
