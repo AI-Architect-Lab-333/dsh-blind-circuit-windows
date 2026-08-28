@@ -1,6 +1,6 @@
 # Guide: Blind-Circuit Confidential File Analysis — DeepSeek Harness Web UI on Windows, llama.cpp on a Tailscale-only GPU Box, No Cloud
 
-**The problem this guide solves**: you want a local agent to work on files that must not leave the machine, while a **cloud coding agent** (Grok, Claude Code, Cursor, …) still helps you start processes and check that services are up. If that coding agent is allowed to open the workspace, those bytes are already in a cloud transcript. This guide documents a **verified working** configuration (Windows 11 operator PC + NVIDIA GB10-class ARM GPU box on Tailscale only, DeepSeek Harness Web UI `dsh web` on `127.0.0.1:3080`, llama.cpp `deepseek-v4-flash` on `:8000` and `qwen3-vl` on `:8001`, August 2026): the coding agent is limited to ops (start UI, probe model **ids**, `Test-Path`); only you and the models on the GPU box read the files.
+**The problem this guide solves**: you want a local agent to work on files that must not leave the machine, while a **cloud coding agent** (Grok, Claude Code, Cursor, …) still helps you start processes and check that services are up. If that coding agent is allowed to open the workspace, those bytes are already in a cloud transcript. This guide documents a **verified working** configuration (Windows 11 operator PC + NVIDIA GB10-class ARM GPU box on Tailscale only, DeepSeek Harness **0.1.1-rc.2** Web UI `dsh web` on `127.0.0.1:3080`, llama.cpp `deepseek-v4-flash` on `:8000` and `qwen3-vl` on `:8001`, August 2026): the coding agent is limited to ops (start UI, probe model **ids**, `Test-Path`); only you and the models on the GPU box read the files.
 
 It covers why **`Start-Process -WindowStyle Hidden` reports `dsh-web READY` then the browser gets `ERR_CONNECTION_REFUSED`**, why DeepSeek Harness refuses a custom OpenAI-compatible route with **`No API key for provider: spark`** even though llama.cpp does not check a key, why filling the **DeepSeek official** API-key card sends work to the cloud, why the **dsh agent’s shell has no `SPARK_API_KEY`** and will open `~\.dsh` if you let it, and why **pasting dsh chain-of-thought back into the coding agent** destroys the circuit.
 
@@ -31,7 +31,7 @@ Symptom you are guarding against: the coding agent is told to summarise, grep, o
 
 ## 2. Point dsh at the GPU box, not at DeepSeek platform
 
-On the operator PC, `$DSH_HOME` is usually `~\.dsh`. Edit `settings.yaml` **only** for the two Spark routes. Do not paste this file into a coding-agent chat (it holds URLs). Shape that ran:
+On the operator PC, `$DSH_HOME` was `~\.dsh` (the default when the variable is unset; check it if you have set one). Edit `settings.yaml` **only** for the two Spark routes. Do not paste this file into a coding-agent chat (it holds URLs). Shape that ran:
 
 ```yaml
 llm-pi-ai:
@@ -120,7 +120,9 @@ Symptom: a helper script `Start-Process pnpm.cmd dsh web --no-open -WindowStyle 
 
 ## 4. What you do in the Web UI
 
-A fresh UI has **no workspace** until you add one. The composer stays unavailable until that step.
+A fresh UI has **no workspace** until you add one. The composer stays unavailable until that step. The control labels below are the ones **dsh 0.1.1-rc.2** shows; this is the most perishable part of the guide — a later release may rename them, and the steps still hold even if the wording drifts.
+
+`CONSIGNE-AGENT.md` is a convention of this setup, not a dsh feature: a plain Markdown brief you write and drop at the workspace root, telling the local model what the job is (what the documents are, what to produce, what to leave alone). It exists so the instruction stays **in the workspace** instead of being typed into a chat that a coding agent might later read. Keep it free of anything you would not want in the output.
 
 1. Open `http://127.0.0.1:3080`.
 2. **Add workspace** (left) or **Choose workspace** (centre). In **Select Workspace Directory**, **Edit path**, paste the job folder (the directory that contains the files to judge **and** `CONSIGNE-AGENT.md` if you use one). **Enter**, then **Open**.
@@ -176,6 +178,8 @@ A `/v1/models` 200 without a living UI is not this section. A living UI that use
 
 ## Known limitations
 
+- **The circuit is enforced by operator discipline, not by a sandbox.** Nothing here technically prevents a coding agent from reading the workspace — it simply is not asked to, and is refused when it offers. If you want a harder boundary, put the rule where the agent reads it (a per-agent instruction file or skill that names the directories as off-limits), or run the coding agent under a filesystem policy that cannot reach them. That was not part of the verified setup.
+- **UI steps were verified against dsh 0.1.1-rc.2** (tag `dsh-v0.1.1-rc.2`). Control names in section 4 may change in later releases.
 - **One operator was verified: dsh Web UI on Windows.** Open WebUI, a human-run Python client, or Hermes-on-a-VPS talking to the same llama.cpp endpoints were not run for this procedure. They can stay on-box if they never leave the tailnet and never feed a coding agent; they are not this guide.
 - **DeepSeek Harness Python SDK is unsupported on Windows** (Linux x64 / Linux arm64 / macOS arm64). Do not use `dsh --profile headless` from the coding agent: the final answer prints in that chat.
 - **Two-model power-on** (text then vision, CUDA OOM if Qwen-VL starts at the first LLM 200) is documented in [dgx-spark-vl-beside-llm](https://github.com/AI-Architect-Lab-333/dgx-spark-vl-beside-llm), not here.
@@ -189,4 +193,4 @@ A `/v1/models` 200 without a living UI is not this section. A living UI that use
 DeepSeek Harness (`dsh`) is open source ([deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)). llama.cpp serves the OpenAI-compatible APIs. Tailscale is the private network. The blind-circuit split (coding agent vs GPU-box models vs localhost UI) and the Windows Job Object failure mode are specific to this setup.
 
 ---
-*Guide written and verified in August 2026 on a Windows 11 operator PC and an NVIDIA GB10-class ARM GPU box (llama.cpp `deepseek-v4-flash` `:8000`, `qwen3-vl` `:8001`, DeepSeek Harness Web UI `127.0.0.1:3080`). Probes printed model ids only. The Web UI returned HTTP 200. Workspace contents were not copied into the coding-agent chat.*
+*Guide written and verified in August 2026 on a Windows 11 operator PC and an NVIDIA GB10-class ARM GPU box. Versions: DeepSeek Harness 0.1.1-rc.2 (`dsh-v0.1.1-rc.2`), Web UI on `127.0.0.1:3080`, llama.cpp serving `deepseek-v4-flash` `:8000` and `qwen3-vl` `:8001`. Probes printed model ids only. The Web UI returned HTTP 200. Workspace contents were not copied into the coding-agent chat.*
