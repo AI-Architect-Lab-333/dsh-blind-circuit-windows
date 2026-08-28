@@ -19,7 +19,7 @@ It covers why **`Start-Process -WindowStyle Hidden` reports `dsh-web READY` then
 | Coding agent (Grok / Claude / …) | Operator PC | **No** |
 | Cloud APIs, web search | Anywhere else | **No** |
 
-This guide assumes the GPU box already serves those two OpenAI-compatible APIs on its **Tailscale IP only**. Wiring llama.cpp and the vision unit is a separate piece of work ([cross-host inference](https://github.com/AI-Architect-Lab-333/dgx-spark-cross-host-inference) and [VL beside the LLM](https://github.com/AI-Architect-Lab-333/dgx-spark-vl-beside-llm)). After a power-on, wait until both `/v1/models` endpoints return 200 before starting dsh; the two-model boot is documented in the VL guide, not here.
+This guide assumes the GPU box already serves those two OpenAI-compatible APIs on its **Tailscale IP only**. Putting the **text** LLM on Tailscale `:8000` is a separate piece of work ([cross-host inference](https://github.com/AI-Architect-Lab-333/dgx-spark-cross-host-inference)). Adding **Qwen-VL on `:8001` beside that LLM**, and the two-model power-on, is another ([VL beside the LLM](https://github.com/AI-Architect-Lab-333/dgx-spark-vl-beside-llm)). After a power-on, wait until both `/v1/models` endpoints return 200 before starting dsh.
 
 The DeepSeek Harness **Python SDK is not supported on Windows**. The Web UI is.
 
